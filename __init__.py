@@ -4,6 +4,7 @@
 
 import h5py
 import numpy as np
+from datetime import datetime
 
 __all__ = ["H5HutAccessor"]
 
@@ -26,6 +27,7 @@ class H5HutStep():
 class H5HutAccessor():
     def __init__(self, fn):
         f = h5py.File(fn, 'r')
+        self.modified_time = datetime.fromtimestamp(int(os.stat(fn).st_mtime))
         self._fn = fn
         self._h5 = f
         self.steps = sorted([k for k in f.keys() if k.startswith("Step#")], key=lambda n: int(n.split('#')[-1]))
