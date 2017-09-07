@@ -56,7 +56,3 @@ class H5HutAccessor():
 
     def __len__(self):
         return len(self.steps)
-
-    def reload(self):
-        self._h5.close()
-        self.__init__(self._fn)
