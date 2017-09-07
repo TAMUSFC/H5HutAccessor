@@ -9,7 +9,7 @@ import numpy as np
 
 __all__ = ["H5HutAccessor"]
 
-DATASETKEYS = {'x', 'y', 'z', 'px', 'py', 'pz'}
+DATASETKEYS = {'x', 'y', 'z', 'px', 'py', 'pz', 'id'}
 # this dict maps the user-facing key to the appropriate H5Hut attr key
 STEPATTRKEYS = {'t': 'TIME',
              'theta': 'REFTHETA',
