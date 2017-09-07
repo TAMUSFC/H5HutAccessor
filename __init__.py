@@ -26,12 +26,10 @@ class H5HutStep():
 
 
 class H5HutAccessor():
-    def __init__(self, fn):
-        f = h5py.File(fn, 'r')
+    def __init__(self, fn, stride=1, maxstep=-1):
+        self._h5 = f = h5py.File(fn, 'r')
         self.modified_time = datetime.fromtimestamp(int(os.stat(fn).st_mtime))
-        self._fn = fn
-        self._h5 = f
-        self.steps = sorted([k for k in f.keys() if k.startswith("Step#")], key=lambda n: int(n.split('#')[-1]))
+        self.steps = sorted([k for k in f.keys() if k.startswith("Step#")], key=lambda n: int(n.split('#')[-1]))[:maxstep:stride]
         # Concisely set all the properties that can be retrieved for all steps
         for prop in DATASETKEYS.union(STEPATTRKEYS.keys()):
             setattr(self, prop, np.asarray([getattr(step, prop) for step in self]))
