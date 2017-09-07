@@ -66,6 +66,9 @@ bunches, so that some of the shapes below may be too specific.
       * `x` [dataset], shape (Nparticles,) ndarray of particle x positions (m)
       * `y` [dataset], shape (Nparticles,) ndarray of particle y positions (m)
       * `z` [dataset], shape (Nparticles,) ndarray of particle z positions (m)
+      * `px` [dataset], shape (Nparticles,) ndarray of particle x momenta (1, units of beta*gamma)
+      * `py` [dataset], shape (Nparticles,) ndarray of particle y momenta (1, units of beta*gamma)
+      * `pz` [dataset], shape (Nparticles,) ndarray of particle z momenta (1, units of beta*gamma)
 
 N.B. ALL of the structure of `Block` is **required** for specifying fields with
 H5Part files, even if one of the fields is zero everywhere etc!
