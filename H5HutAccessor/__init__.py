@@ -121,6 +121,40 @@ class H5HutAccessor():
         # There isn't a good reason to keep the file open at the moment
         h5file.close()
 
+    @property
+    def dx(self):
+        return self.x - self.x0
+
+    @property
+    def dy(self):
+        return self.y - self.y0
+
+    @property
+    def dz(self):
+        return self.z - self.z0
+
+    @property
+    def dpx(self):
+        return self.px - self.px0
+
+    @property
+    def dpy(self):
+        return self.py - self.py0
+
+    @property
+    def dpz(self):
+        return self.pz - self.pz0
+
+    @property
+    def r(self):
+        """ The radius of each particle in the cylindrical coordinate system"""
+        return np.sqrt(self.x**2 + self.y**2)
+
+    @property
+    def th(self):
+        """ The angle of each particle """
+        return np.arctan2(self.y, self.x)
+
     def __enter__(self):
         return self
 
