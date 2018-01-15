@@ -74,5 +74,6 @@ N.B. ALL of the structure of `Block` is **required** for specifying fields with
 H5Part files, even if one of the fields is zero everywhere etc!
 
 ### Acknowledgements
-Thanks to Daniel Winklehner for providing an example
-program (`ascii2h5block_asgic.cpp`) for creating an H5Part fieldmap file.
+Thanks to Daniel Winklehner for providing the example
+program [`ascii2h5block_asgic.cpp`](https://gitlab.psi.ch/OPAL/src/blob/OPAL-1.9.0/tools/BandRF/ascii2h5block_asgic.cpp)
+for creating an H5Part fieldmap file.
