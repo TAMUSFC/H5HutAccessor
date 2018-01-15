@@ -8,6 +8,7 @@ from datetime import datetime
 import h5py
 import numpy as np
 
+
 class H5HutAccessor():
     """
     An accessor class that loads an H5Hut file and stores the data in  more 
@@ -58,6 +59,7 @@ class H5HutAccessor():
 
         Nstep = len(self.steps)
 
+        assert h5file[self.steps[0]].attrs['NumBunch'] == 1, "Only single-bunch files supported"
         # NOT correct for injected beams!
         Npart = h5file[self.steps[0]]['id'].size
         
