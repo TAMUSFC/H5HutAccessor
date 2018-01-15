@@ -94,12 +94,29 @@ class H5HutAccessor():
         
         # there could possibly be some memory duplication issue here if copies 
         # are created instead of views, but I *think* numpy should always give a view.
+        # TODO: these are all GLOBAL COORDINATES, make Frenet frame transform method
         self.x = self._particledata[:, :, 0]
         self.y = self._particledata[:, :, 1]
         self.z = self._particledata[:, :, 2]
         self.px = self._particledata[:, :, 3]
         self.py = self._particledata[:, :, 4]
         self.pz = self._particledata[:, :, 5]
+
+        # aliases for the reference particle's 6D properties
+        # the funky shape trick with [0] is to allow the user to write:
+        #
+        #       dx =  h.x  - h.x0
+        #       dpx = h.px - h.px0
+        #
+        # and so on, without any need for munging to a compatible (flat) shape
+        # (i.e. (Nstep,) -> (Nstep, 1)
+
+        self.x0 = self.x[:,   [0]]
+        self.y0 = self.y[:,   [0]]
+        self.z0 = self.z[:,   [0]]
+        self.px0 = self.px[:, [0]]
+        self.py0 = self.py[:, [0]]
+        self.pz0 = self.pz[:, [0]]
 
         # There isn't a good reason to keep the file open at the moment
         h5file.close()
