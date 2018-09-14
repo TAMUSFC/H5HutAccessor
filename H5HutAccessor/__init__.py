@@ -8,32 +8,53 @@ from datetime import datetime
 import h5py
 import numpy as np
 
+from matplotlib import pyplot as plt
+
+from scipy.signal import argrelmin
+
+from analysis_helpers import in_sector
+
 
 class H5HutAccessor():
-    """
-    An accessor class that loads an H5Hut file and stores the data in  more 
-    useful numpy arrays
+    r"""
+    An accessor class that loads an H5Hut file and stores the data in more 
+    useful numpy arrays.
 
     Attributes
     ----------
     t : float
         global time (sec)
-    theta : float
-        angles of reference (pid=0) particle (deg)
-    s : float
-        s coordinates of reference (pid=0) particle (m)
+    reftheta : float
+        reference angle for each step (deg)
+    refs : float
+        reference axial distance for each step (m)
+    refx, refy, refz : float
+        reference position for each step (m)
+    refpx, refpy, refpz : float
+        reference momentum for each step (beta*gamma)
+    refT : float
+        reference energy for each step (MeV)
     Bref : float ndarray with shape (Nstep, 3)
-        Magnetic field seen by reference (pid=0) particle (T)
+        Reference magnetic field (T)
     Eref : float ndarray with shape (Nstep, 3)
-        Electric field seen by reference (pid=0) particle (MV/m)
+        Reference electric field (MV/m)
     x, y, z : float ndarray with shape (Nstep, Nparticles)
         spatial coordinates (global frame) of all particles (m)
     px, py, pz : float ndarray with shape (Nstep, Nparticles)
         momentum coordinates (global frame) of all particles (units of beta*gamma)
+    unitinfo : dict
+        all unit information stored on the head of the H5Hut file
 
+    Notes
+    -----
+    The units given above are typical for my use case, but check the `unitinfo`
+    property to be sure.
+
+    OPAL uses the symbol # to indicate special characters, which seem to be LaTeX,
+    i.e. `#varepsilon` -> $\varepsilon$, `#beta` -> $\beta$, etc.
     """
 
-    def __init__(self, fn, stride=1, minstep=0, maxstep=-1):
+    def __init__(self, fn, stride=1, minstep=0, maxstep=-1, maxparts=None):
         """
         Parameters
         ----------
@@ -46,14 +67,20 @@ class H5HutAccessor():
         minstep : int, optional
             phase dump (not integrator!) step (default: 0) to begin processing 
             from
-        mmaxstep : int, optional 
+        maxstep : int, optional 
             maximum phase dump (not integrator!) step (default: -1) to process
+        maxparts : int, optional
+            max number of particles to consider on each step. This is the same
+            as only taking the first `maxparts` columns in an un-filtered 
+            instance, and is meant for quickly loading files with lots of
+            particles.
 
         Notes
         -----
         The HDF5 will be closed after initialization.
         """
         self._h5 = h5file = h5py.File(fn, 'r')
+        self._fn = fn
         self.modified_time = datetime.fromtimestamp(int(os.stat(fn).st_mtime))
         self.steps = sorted([k for k in h5file.keys() if k.startswith('Step#')][minstep:maxstep:stride], key=lambda n: int(n.split('#')[-1]))
 
@@ -66,35 +93,59 @@ class H5HutAccessor():
         # iterating steps is relatively expensive, so let's establish arrays to store data
         # the default datatype is np.float64 (8 bytes per value), so 8 * (Nstep*(3+6+6*Npart)) bytes total
         # (~ 80 MB for 1000 particles and 1667 steps; attrs data should be kbytes worth at O(Nstep))
-        self.s, self.theta, self.t = [np.full((Nstep,), np.nan) for _ in range(3)]
-        self.Bref, self.Eref = [np.full((Nstep, 3), np.nan) for _ in range(2)]
+        for refarray in ('refs', 'refr', 'reftheta', 'refz', 
+                         'refpr', 'refpt', 'refpz', 't',
+                         'refT'):
+            setattr(self, refarray, np.full((Nstep,), np.nan))
+        for refarray in ('Bref', 'Eref', 'emit', 'emit_geom'):
+            setattr(self, refarray, np.full((Nstep, 3), np.nan))
+
         self._particledata = np.full((Nstep, Npart, 6), np.nan)
 
+        # store a bunch of unit information
+        self.unitinfo = {k: v for k,v in h5file.attrs.items() if 'unit' in k.lower()}
         for stepnum, step in enumerate(self.steps):
             try:
                 pid = h5file[step]['id'][()]
-                self.s[stepnum] = h5file[step].attrs['SPOS'][()]
-                self.theta[stepnum] = h5file[step].attrs['REFTHETA'][()]
-                self.t[stepnum] = h5file[step].attrs['TIME'][()]
-                self.Bref[stepnum, :] = h5file[step].attrs['B-ref'][()]
-                self.Eref[stepnum, :] = h5file[step].attrs['E-ref'][()]
+                s = h5file[step]
+                self.refs[stepnum]          = s.attrs['SPOS'][()]
+                self.t[stepnum]             = s.attrs['TIME'][()]
+                self.refr[stepnum]          = s.attrs['REFR'][()] * 1e-3 # mm -> m
+                self.reftheta[stepnum]      = s.attrs['REFTHETA'][()]
+                self.refz[stepnum]          = s.attrs['REFZ'][()] * 1e-3 # mm -> m
+                self.refpr[stepnum]         = s.attrs['REFPR'][()]
+                self.refpt[stepnum]         = s.attrs['REFPT'][()]
+                self.refpz[stepnum]         = s.attrs['REFPZ'][()]
+                self.refT[stepnum]          = s.attrs['ENERGY'][()]
+                # normalized emittance - m rad
+                # the statistic eps_norm_m from classic/5.0/src/Algorithms/PartBunch.cpp
+                self.emit[stepnum, :]       = s.attrs['#varepsilon'][()]
+                # geometric emittance - m rad
+                # the statistic eps_m from classic/5.0/src/Algorithms/PartBunch.cpp
+                self.emit_geom[stepnum, :]  = s.attrs['#varepsilon-geom'][()]
+
+                # HUH, these are backwards?!
+                self.Bref[stepnum, :]       = s.attrs['E-ref'][()]
+                self.Eref[stepnum, :]       = s.attrs['B-ref'][()]
                 
-                self._particledata[stepnum, pid, 0] = h5file[step]['x'][()]
-                self._particledata[stepnum, pid, 1] = h5file[step]['y'][()]
-                self._particledata[stepnum, pid, 2] = h5file[step]['z'][()]
-                self._particledata[stepnum, pid, 3] = h5file[step]['px'][()]
-                self._particledata[stepnum, pid, 4] = h5file[step]['py'][()]
-                self._particledata[stepnum, pid, 5] = h5file[step]['pz'][()]
-            except KeyError, IOError:
+                self._particledata[stepnum, pid, 0] = s['x'][()]
+                self._particledata[stepnum, pid, 1] = s['y'][()]
+                self._particledata[stepnum, pid, 2] = s['z'][()]
+                self._particledata[stepnum, pid, 3] = s['px'][()]
+                self._particledata[stepnum, pid, 4] = s['py'][()]
+                self._particledata[stepnum, pid, 5] = s['pz'][()]
+            except (KeyError, IOError):
                 print("Can't read step %d, truncating arrays" % (stepnum+1))
-                self.s, self.theta, self.t, 
-                self.Bref, self.Eref = [a[:stepnum] for a in self.s, self.theta, self.t, self.Bref, self.Eref]
+                self.refs, self.reftheta, self.refz, self.t, 
+                self.Bref, self.Eref = [a[:stepnum] for a in (self.refs, self.reftheta, self.refz, self.t, 
+                                                             self.Bref, self.Eref)]
                 self._particledata = self._particledata[:stepnum, :, :]
                 break
         
         # there could possibly be some memory duplication issue here if copies 
         # are created instead of views, but I *think* numpy should always give a view.
         # TODO: these are all GLOBAL COORDINATES, make Frenet frame transform method
+        #       (see frenet_6D() below)
         self.x = self._particledata[:, :, 0]
         self.y = self._particledata[:, :, 1]
         self.z = self._particledata[:, :, 2]
@@ -118,43 +169,260 @@ class H5HutAccessor():
         self.py0 = self.py[:, [0]]
         self.pz0 = self.pz[:, [0]]
 
+        self.p0 = np.linalg.norm((self.px0, self.py0, self.pz0), axis=0)
+
+        # the trace-space coordinate x'=dx/ds=(dx/dt)/(ds/dt) should be ~ px/p
+        self.xp = self.px / self.p0
+        self.yp = self.py / self.p0
+        self.zp = self.pz / self.p0
+
+        self.turnidx = turn_transitions(self.x0.squeeze(), self.y0.squeeze())
+
         # There isn't a good reason to keep the file open at the moment
         h5file.close()
 
     @property
+    def refx(self):
+        return self.refr * np.cos(self.reftheta * np.pi/180.)
+
+    @property
+    def refy(self):
+        return self.refr * np.sin(self.reftheta * np.pi/180.)
+
+    @property
+    def refp(self):
+        theta = self.reftheta * np.pi/180.
+        transp = (self.refpr[:, np.newaxis] * rhat(theta) + 
+                  self.refpt[:, np.newaxis] * phihat(theta))
+        return np.concatenate((transp, self.refpz[:, np.newaxis]), axis=1)
+
+    @property
+    def tns(self):
+        """ Step times in ns """
+        return self.t*1e9
+
+    @property
+    def refpx(self):
+        return self.refp[:, 0]
+
+    @property
+    def refpy(self):
+        return self.refp[:, 1]
+        
+    @property
     def dx(self):
-        return self.x - self.x0
+        """ x-offset from reference position (m) """
+        return self.x - self.refx[:, np.newaxis]
 
     @property
     def dy(self):
-        return self.y - self.y0
+        """ y-offset from reference position (m) """
+        return self.y - self.refy[:, np.newaxis]
 
     @property
     def dz(self):
-        return self.z - self.z0
+        """ z-offset from reference position (m) """
+        return self.z - self.refz[:, np.newaxis]
+
+    @property
+    def dr(self):
+        return np.stack((self.dx, self.dy, self.dz), axis=-1)
 
     @property
     def dpx(self):
-        return self.px - self.px0
+        """ offset from reference x-momentum (m) """
+        return self.px - self.refpx[:, np.newaxis]
 
     @property
     def dpy(self):
-        return self.py - self.py0
+        """ offset from reference y-momentum (m) """
+        return self.py - self.refpy[:, np.newaxis]
 
     @property
     def dpz(self):
-        return self.pz - self.pz0
+        """ offset from reference z-momentum (m) """
+        return self.pz - self.refpz[:, np.newaxis]
 
     @property
     def r(self):
-        """ The radius of each particle in the cylindrical coordinate system"""
+        """ The radius of each particle in the global cylindrical coordinate system (m) """
         return np.sqrt(self.x**2 + self.y**2)
 
     @property
     def th(self):
-        """ The angle of each particle """
+        """ The angle of each particle (rad) """
         return np.arctan2(self.y, self.x)
+    
+    def phase(self):
+        """
+        Calculate the betatron phases at all steps
+        
+        Returns
+        -------
+        phase_x, phase_y
+        """
+        
+        dx, xp, dy, yp, dz, zp = self.frenet_6D()
+        beta_x, alfa_x, gama_x, emit_x = twiss(dx, xp)
+        beta_y, alfa_y, gama_y, emit_y = twiss(dy, yp)
 
+        ds = np.ediff1d(self.refs)
+
+        phase_x = np.cumsum(ds/beta_x[1:])
+        phase_y = np.cumsum(ds/beta_y[1:])
+        return phase_x, phase_y
+    
+    def arc_mask(self, secnum, turnnum):
+        """
+        Return the step numbers of this trajectory that correspond to the given arc
+        """
+        assert 1 <= turnnum <= 16
+        if turnnum == 1:
+            turnstart = 0
+            turnend = self.turnidx[0]
+            if turnend < 10:
+                raise ValueError('Something is almost certainly wrong, less than 10 steps in the first turn...')
+        else:
+            turnstart = self.turnidx[turnnum-2]
+            turnend = self.turnidx[turnnum-1]
+        turnx = self.x0[turnstart:turnend]
+        turny = self.y0[turnstart:turnend]
+        
+        return turnstart + np.argwhere(in_sector(turnx, turny, secnum))[:, 0]
+        
+    def frenet_6D(self):
+        """
+        Calculate the values in the Frenet-Serret frame of (dx, dpx, dy, dpy, dz, dpz)
+
+        NOTE: +y in this notation means the vertical coordinate (what OPAL/H5HutAccessor call +z), and
+              +z means the longitundinal coordinate.
+        """
+        # step-by-step transformation into the Frenet frame
+        # p0 lies in the +s direction (beam direction)
+        # crossing this with +z (vertical) gives radially OUT (+x)
+
+        pxbar = self.px.mean(axis=1)
+        pybar = self.py.mean(axis=1)
+        pzbar = self.pz.mean(axis=1)
+        pbar = np.stack((pxbar, pybar, pzbar), axis=-1)
+        normp = np.linalg.norm(pbar.squeeze(), axis=1)[:, np.newaxis]
+        phat = (pbar/normp)
+
+        # NOTE that this notation is different from the global coordinate system
+        # it is conventional to call the vertical direction +y, the radial/transverse +x, and the axial +z
+        yhat = np.array([0, 0, 1])
+        xhat = np.cross(phat, yhat)
+
+        xbar = self.x.mean(axis=1)
+        ybar = self.y.mean(axis=1)
+        zbar = self.z.mean(axis=1)
+
+        dx =  np.nan_to_num(self.x.T-xbar).T
+        dy =  np.nan_to_num(self.y.T-ybar).T
+        dz =  np.nan_to_num(self.z.T-zbar).T
+        dpx = np.nan_to_num(self.px.T-pxbar).T
+        dpy = np.nan_to_num(self.py.T-pybar).T
+        dpz = np.nan_to_num(self.pz.T-pzbar).T
+
+        xhat = xhat[:, np.newaxis, :]
+        phat = phat[:, np.newaxis, :]
+
+        # stack into vectors, then project into the Frenet basis (spanned by [phat, xhat, yhat])
+        dr = np.stack((dx, dy, dz), axis=-1)
+        dx = (dr * xhat).sum(axis=-1)
+        dy = (dr * yhat).sum(axis=-1)
+        dz = (dr * phat).sum(axis=-1)
+
+        dp = np.stack((dpx, dpy, dpz), axis=-1)
+        dpx = (dp * xhat).sum(axis=-1)
+        dpy = (dp * yhat).sum(axis=-1)
+        dpz = (dp * phat).sum(axis=-1)
+
+        xp = dpx / normp
+        yp = dpz / normp
+        zp = dpy / normp
+
+        return [np.nan_to_num(arr) for arr in (dx, xp, dy, yp, dz, dpz)]
+    
+    def plot_trace(self, step, which, kind='marker', *args, **kwargs):
+        """
+        Given a step number, plot one of the transverse trace spaces
+
+        Params
+        ------
+        step - step number to plot
+        which - "xx'", "yy'", or "ss'" to indicate which trace space to plot
+        kind - 'marker' or 'hex'
+            controls whether the plot uses unfilled circular markers (default) or hexbin()
+
+        Notes
+        -----
+        *args, **kwargs are passed to each plotting function (plot() and hexbin())
+        """
+        dx, xp, dy, yp, dz, zp = self.frenet_6D()
+
+        NBINS = 50  # default value for hexbin() if user doesn't pass one
+
+        title = f't={self.tns[step]:.2f} ns'
+
+        if which == "xx'":
+            hvar = dx[step, :]
+            vvar = xp[step, :]
+            xlabel = "x (m)"
+            ylabel = "x' (rad)"
+            beta, alfa, gama, emit = [val[step] for val in twiss(dx, xp)]
+            title += f' $\\beta_x={beta:.2f}$ m'
+        elif which == "yy'":
+            hvar = dy[step, :]
+            vvar = yp[step, :]
+            xlabel = "y (m)"
+            ylabel = "y' (rad)"
+            title += f' $\\beta_y={beta:.2f}$ m'
+            beta, alfa, gama, emit = [val[step] for val in twiss(dy, yp)]
+        elif which == "ss'":
+            hvar = dz[step, :]
+            vvar = zp[step, :]
+            xlabel = "s (m)"
+            ylabel = "s' (rad)"
+        elif which == 'xy':
+            raise NotImplemented
+        else:
+            raise ValueError(f"Plot type '{which} not supported")
+
+        fig = plt.figure(figsize=(16, 12), facecolor='white')
+        if kind == 'marker':
+            plt.plot(hvar, vvar, 'ko', mfc='none')
+        elif kind == 'hex':
+            gridsize = kwargs['gridsize'] if 'gridsize' in kwargs else NBINS
+            plt.hexbin(hvar, vvar, gridsize=gridsize)
+            plt.colorbar()
+        else:
+            raise TypeError("'kind' must be either 'marker' or 'hex' ")
+
+        plt.title(title) 
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+
+        # plot RMS "window"
+        if which in ("xx'", "yy'"):
+            XLIM = plt.xlim()
+            YLIM = plt.ylim()
+            winH = np.sqrt(beta * emit)
+            winV = np.sqrt(gama * emit)
+            plt.vlines([-winH, winH], -1, 1, 'r', '--')
+            plt.hlines([-winV, winV], -1, 1, 'r', '--')
+            a, b = l_axes(alfa, beta, gama, emit)
+            ang = angle(alfa, beta, gama, emit)
+            t = np.linspace(0, 2*np.pi, 100)
+            xe = a*np.cos(t)
+            ye = b*np.sin(t)
+            xe, ye = (xe*np.cos(ang) + ye*np.sin(ang), xe*np.sin(ang) - ye*np.cos(ang))
+            plt.plot(xe, ye, 'r-')
+            plt.xlim(XLIM)
+            plt.ylim(YLIM)
+
+        return fig
+    
     def __enter__(self):
         return self
 
@@ -169,3 +437,127 @@ class H5HutAccessor():
 
     def __len__(self):
         return len(self.steps)
+
+
+def rhat(theta):
+    r""" 
+    Returns the unit vector $\hat{r} = cos(\theta) \hat{x} + sin(\theta) \hat{y}$
+    
+    theta - angle in radians
+    """
+    return np.stack((np.cos(theta), np.sin(theta)), axis=1).squeeze()
+
+def phihat(theta):
+    r""" 
+    Returns the unit vector $\hat{phi} = -sin(\theta) \hat{x} + cos(\theta) \hat{y}$
+    
+    theta - angle in radians
+    """
+    return np.stack((-np.sin(theta), np.cos(theta)), axis=1).squeeze()
+
+def l_axes(alfa, beta, gama, emit):
+    u"""
+    Given parameters (α, β, γ, ε) for a trace-space ellipse, calculate the length of each axis
+    
+    Notes
+    -----
+    Taken unceremoniously from http://mathworld.wolfram.com/Ellipse.html
+    """
+    g = -emit
+    a = gama
+    b = alfa
+    c = beta
+    
+    numerator = 2*(g*b**2 - a*c*g)
+    
+    denom = (b**2 - a*c) * (np.sqrt((a-c)**2 + 4*b**2) - (a+c))
+    
+    La = np.sqrt(numerator/denom)
+    
+    denom = (b**2 - a*c) * (-np.sqrt((a-c)**2 + 4*b**2) - (a+c))
+    
+    Lb = np.sqrt(numerator/denom)
+    
+    return La, Lb
+
+def angle(alfa, beta, gama, emit):
+    u"""
+    Given parameters (α, β, γ, ε) for a trace-space ellipse, calculate the angle of rotation of the ellipse (from major along +x) 
+     
+    Notes
+    -----
+    Taken unceremoniously from http://mathworld.wolfram.com/Ellipse.html
+    """
+    a = gama
+    b = alfa
+    c = beta
+    if np.isclose(alfa, 0):
+        if a < c:
+             return 0
+        else:
+             return np.pi
+            
+    assert((a-c)/(2*b) != 0)
+    
+    # note: numpy does not have arccot(), but if z != 0, arccot(z) = arctan(1/z)
+    ang = 1./2 * np.arctan((2*b)/(a-c))
+    if a <= c:
+        return ang 
+    else:
+        return np.pi/2 + ang
+    
+def rmsemit(x, xp):
+    """ Given a trace space (x, xp), calculate the RMS emittance """
+    x = np.asarray(x)
+    xp = np.asarray(xp)
+    xx = (x**2).mean()
+    xxp = (x*xp).mean()
+    xpxp = (xp**2).mean()
+    return np.sqrt(xx*xpxp - xxp**2)
+
+def twiss(x, xp):
+    """
+    Given a trace space (x, xp) (in the Frenet frame), calculate the 
+    values of beta_x, alfa_x, gama_x, emit_x
+    """
+    # "centering" the distribution so that <x> = <x'> = 0 exactly by construction
+    x -= x.mean(axis=1)[:, np.newaxis]
+    xp -= xp.mean(axis=1)[:, np.newaxis]
+    
+    # expectation values of <x^2> <x'^2>, <xx'>
+    xx = np.mean(x**2, axis=1)
+    xpxp = np.mean(xp**2, axis=1)
+    xxp = np.mean(x*xp, axis=1)
+
+    emit = np.sqrt(xx*xpxp - xxp**2)
+    beta = xx / emit
+    alfa = -xxp / emit
+    gama = xpxp / emit
+    
+    return (beta, alfa, gama, emit)
+
+
+def turn_transitions(x, y, angle=0.0):
+    r"""
+    return array of indices of the arrays x, y indicating where the given particle (column) crossed
+    the line defined by theta=angle (rad) (default = 0) in the last step.
+
+    Parameters
+    ----------
+    x, y - 1d array_like (nturns,)
+        of x and y coordinates
+    angle - float
+        defining angle (rad) for the transition line
+    
+    Returns
+    -------
+    indices - tuple (nparticles)
+        indices of the crossing step for each particle
+
+    Notes
+    -----
+    any `angle` can be provided, but the calculation will be done modulo 2*pi
+    """
+    assert np.ndim(x) == 1 and np.ndim(y) == 1, "input must be 1d"
+    theta = np.arctan2(y, x)
+    return argrelmin((theta + angle) % (2*np.pi))[0]
