@@ -28,7 +28,7 @@ print("Minimum and maximum radii in XY plane: rmin = {rmin} m, rmax = {rmax} m".
 print("Starting momentum: {pstart}, Final momentum: {pfinal}".format(p[0], p[-1]))
 ```
 
-The `with` keyword is also supported:
+The `with` keyword is also supported, although the size of many files will preclude its use:
 
 ```python
 from H5HutAccessor import H5HutAccessor
