@@ -1,0 +1,5 @@
+*.pyc
+*.swp
+H5HutAccessor.egg-info/
+.gitignore
+.ipy*
