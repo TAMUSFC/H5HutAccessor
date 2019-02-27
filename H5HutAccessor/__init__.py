@@ -298,20 +298,35 @@ class H5HutAccessor():
         """ The angle of each particle (rad) """
         return np.arctan2(self.y, self.x)
     
-    def phase(self):
+    def phase(self, refs=None):
         """
         Calculate the betatron phases (rad) at all steps
         
+        Parameters
+        ----------
+        h : H5HutAccessor
+            Simulation output file to use
+        refs : ndarray (optional)
+            reference axial coordinate to use. Must have shape `(Nstep,)`.
+            If not given, the bunch average will be calculated for each step, and 
+            the cumulative sum of the distances between these points will be used.
+
         Returns
         -------
         phase_x, phase_y
         """
         
+        if refs is None:
+            r = np.stack((self.xbar, self.ybar), axis=-1)
+            dr = np.diff(r, axis=0)
+            ds = np.linalg.norm(dr, axis=1)
+            assert (ds > 0).all()  # s should be monotonically-increasing
+        else:
+            ds = np.ediff1d(refs)
+
         dx, xp, dy, yp, dz, zp = self.frenet_6D()
         beta_x, alfa_x, gama_x, emit_x = twiss(dx, xp)
         beta_y, alfa_y, gama_y, emit_y = twiss(dy, yp)
-
-        ds = np.ediff1d(self.refs)
 
         phase_x = np.cumsum(ds/beta_x[1:])
         phase_y = np.cumsum(ds/beta_y[1:])
@@ -700,11 +715,29 @@ def rmsemit(x, xp):
 def twiss(x, xp):
     """
     Given a trace space (x, xp) (in the Frenet frame), calculate the 
-    RMS values of beta_x, alfa_x, gama_x, emit_x
+    RMS values of beta_x, alfa_x, gama_x, emit_x, according to:
+
+        $$$
+        emit = \sqrt(<x^2> * <x'^2> - <x x'>^2)
+        beta = <x^2> / emit
+        alfa = -<x x'> / emit
+        gama = <x' x'> / emit
+        $$$
+
+    Notes
+    -----
+    NaN values in either `x` or `xp` are ignored.
+    The units of the returned Twiss parameters will depend on the input, but
+    if `x` is given in meters and `xp` is given in radians, then beta will be
+    in meters and emit will be in m*rad.
+
+    Returns
+    -------
+    (beta, alfa, gama, emit)
     """
     # "centering" the distribution so that <x> = <x'> = 0 exactly by construction
-    x -= x.nanmean(axis=1)[:, np.newaxis]
-    xp -= xp.nanmean(axis=1)[:, np.newaxis]
+    x -= np.nanmean(x, axis=1)[:, np.newaxis]
+    xp -= np.nanmean(xp, axis=1)[:, np.newaxis]
     
     # expectation values of <x^2> <x'^2>, <xx'>
     xx = np.nanmean(x**2, axis=1)
