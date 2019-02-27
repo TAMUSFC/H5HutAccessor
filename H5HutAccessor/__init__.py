@@ -4,19 +4,43 @@
 import os
 import pathlib
 from datetime import datetime
+from functools import lru_cache
 
 import h5py
 import numpy as np
 from scipy.signal import argrelmin
 from matplotlib import pyplot as plt
+from matplotlib.gridspec import GridSpec
+from matplotlib.colorbar import Colorbar
 
 from .analysis_helpers import in_sector
 
 
 class H5HutAccessor():
     r"""
-    An accessor class that loads an H5Hut file and stores the data in more 
-    useful numpy arrays.
+    Loads an H5Hut file and stores the data in more useful numpy arrays.
+
+    Parameters
+    ----------
+    fn : str
+        path to the H5Hut file to process
+    stride : int, optional
+        stepsize (default: 1) between adjacent steps to load. Useful if the 
+        user wants to examine a very fine file without using ALL the 
+        temporal resolution.
+    minstep : int, optional
+        phase dump (not integrator!) step (default: 0) to begin processing 
+        from
+    maxstep : int, optional 
+        maximum phase dump (not integrator!) step (default: -1) to process
+    steps : sequence of ints, optional
+        sequence of step indices to load. If this argument is given, `minstep,
+        maxstep, stride` are all ignored!
+    maxparts : int, optional
+        max number of particles to consider on each step. This is the same
+        as only taking the first `maxparts` columns in an un-filtered 
+        instance, and is meant for quickly loading files with lots of
+        particles.
 
     Attributes
     ----------
@@ -45,47 +69,35 @@ class H5HutAccessor():
 
     Notes
     -----
+    The HDF5 file will be closed after initialization.
+
     The units given above are typical for my use case, but check the `unitinfo`
     property to be sure.
 
-    OPAL uses the symbol # to indicate special characters, which seem to be LaTeX,
-    i.e. `#varepsilon` -> $\varepsilon$, `#beta` -> $\beta$, etc.
+    OPAL uses the symbol # to indicate special characters, which seem to correspond 
+    to the equivalent LaTeX commands, i.e.:
+        #varepsilon -> $\varepsilon$
+        #beta -> $\beta$
+        etc...
     """
 
-    def __init__(self, fn, stride=1, minstep=0, maxstep=None, maxparts=None):
-        """
-        Parameters
-        ----------
-        fn : str
-            path to the H5Hut file to process
-        stride : int, optional
-            stepsize (default: 1) between adjacent steps to load. Useful if the 
-            user wants to examine a very fine file without using ALL the 
-            temporal resolution.
-        minstep : int, optional
-            phase dump (not integrator!) step (default: 0) to begin processing 
-            from
-        maxstep : int, optional 
-            maximum phase dump (not integrator!) step (default: -1) to process
-        maxparts : int, optional
-            max number of particles to consider on each step. This is the same
-            as only taking the first `maxparts` columns in an un-filtered 
-            instance, and is meant for quickly loading files with lots of
-            particles.
-
-        Notes
-        -----
-        The HDF5 will be closed after initialization.
-        """
+    def __init__(self, fn, stride=1, minstep=0, maxstep=None, steps=None, maxparts=None):
         self._fn = str(pathlib.Path(fn).resolve())
         self._h5 = h5file = h5py.File(self._fn, 'r')
         self.modified_time = datetime.fromtimestamp(int(os.stat(fn).st_mtime))
-        steps = [k for k in h5file.keys() if k.startswith('Step#')][minstep:maxstep:stride]
-        self.steps = sorted(steps, key=lambda n: int(n.split('#')[-1]))
+        filesteps = [k for k in h5file.keys() if k.startswith('Step#')]
+        filesteps.sort(key=lambda n: int(n.split('#')[-1]))
+
+        if steps:  # user has provided a list of step indices
+            filesteps = [filesteps[idx] for idx in steps]
+        elif minstep or maxstep or stride:  # user has provided striding information
+            filesteps = filesteps[minstep:maxstep:stride]
+
+        self.steps = filesteps
 
         Nstep = len(self.steps)
 
-        assert h5file[self.steps[0]].attrs['NumBunch'] == 1, "Only single-bunch files supported"
+        assert h5file[self.steps[0]].attrs['NumBunch'] == 1, "Only single-bunch files are supported"
 
         # N.B. this is NOT correct if we inject additional beam after the first saved step!
         pid0 = h5file[self.steps[0]]['id']
@@ -199,19 +211,28 @@ class H5HutAccessor():
         Reference momentum, in units of beta*gamma (dimensionless) and in
         global Cartesian coordinates
         """
-        theta = self.reftheta * np.pi/180.
-        transp = (self.refpr[:, np.newaxis] * rhat(theta) + 
-                  self.refpt[:, np.newaxis] * phihat(theta))
-        return np.concatenate((transp, self.refpz[:, np.newaxis]), axis=1)
+        # OPAL's output of reference quantities can't be trusted
+#         theta = self.reftheta * np.pi/180.
+#         transp = (self.refpr[:, np.newaxis] * rhat(theta) + 
+#                   self.refpt[:, np.newaxis] * phihat(theta))
+#         return np.concatenate((transp, self.refpz[:, np.newaxis]), axis=1)
+        return np.stack((self.pxbar, self.pybar, self.pzbar), axis=-1)
+
+    @property
+    def bg(self):
+        return np.linalg.norm(self.refp, axis=1)
 
     @property
     def beta(self):
         """ Lorentz beta (v/c) at each step """
-        bg = self.refp  # beta*gamma
-        bg = np.linalg.norm(bg, axis=1)
+        # naturally, OPAL's output is sometimes zero for refp, and shouldn't be trusted...
+#         bg = self.refp  # beta*gamma
+#         bg = np.linalg.norm(bg, axis=1)
+#         beta = np.sqrt((bg**2) / (1 + bg**2))
+#         assert np.all((beta >= 0) &
+#                       (beta < 1))
+        bg = self.bg
         beta = np.sqrt((bg**2) / (1 + bg**2))
-        assert np.all((beta >= 0) &
-                      (beta < 1))
         return beta
 
     @property
@@ -226,7 +247,8 @@ class H5HutAccessor():
 
     @property
     def refpx(self):
-        return self.refp[:, 0]
+#         return self.refp[:, 0]
+        return self.pbarx
 
     @property
     def refpy(self):
@@ -278,7 +300,7 @@ class H5HutAccessor():
     
     def phase(self):
         """
-        Calculate the betatron phases at all steps
+        Calculate the betatron phases (rad) at all steps
         
         Returns
         -------
@@ -313,6 +335,7 @@ class H5HutAccessor():
         
         return turnstart + np.argwhere(in_sector(turnx, turny, secnum))[:, 0]
         
+    @lru_cache(1)
     def frenet_6D(self):
         """
         Calculate the values in the Frenet-Serret frame of (dx, x', dy, y', ds, dps)
@@ -390,22 +413,30 @@ class H5HutAccessor():
 
         return (dx, xp, dy, yp, ds, dps)
 
-    def poincare(self, steps, extralabel=lambda step: '', lims=None, colorbar=True):
+
+    def poincareplot(self, steps, extralabel=lambda step: '', lims=None, colorbar=True):
         """
-        Make a set of Poincare plots sequence of steps, or a single one.
-        
+        Make a set of Poincare plots for a given step of sequence thereof.
+
         Parameters
         ----------
-        steps - A sequence of integers, or a single integer, corresponding to the step(s) 
-        extralabel (optional) - a callable that returns an extra string label to add to the title for a given step number
-        lims (optional) - a dictionary of limits for the Poincaré plots, with keys `'xy.h', 'xy.v', 's.h', 's.v'`, and values
-          corresponding to the magnitude of the (symmetric) axis limits on the respective plots. The transverse plots share limits
-          to ensure that they are always comparable, and because we expect roughly axisymmetric beams.
-        colorbar (optional) - boolean indicating whether or not to draw colorbars
-        
+        steps : sequence of int or a single integer
+            The step(s) to plot
+        extralabel : callable, optional 
+            A callable with signature `extralabel(step)` that returns an extra
+            string label to add to the title for a given step number
+        lims : dict, optional 
+            A dictionary of limits for the Poincaré plots, with keys `'xy.h',
+            'xy.v', 's.h', 's.v'`, and values corresponding to the magnitude of
+            the (symmetric) axis limits on the respective plots. The transverse
+            plots share limits to ensure that they are always comparable, and
+            because we expect roughly axisymmetric beams.
+        colorbar : bool, optional
+            Boolean indicating whether or not to draw colorbars
+
         Returns
         -------
-        fig - the resultant Figure object
+        poincarefig : Figure
         """
         try:
             iter(steps)
@@ -413,49 +444,87 @@ class H5HutAccessor():
             steps = [steps]
 
         dx, xp, dy, yp, ds, dps = self.frenet_6D()
-        N = len(steps)
-        fig = plt.figure(figsize=(16, N*6), facecolor='white')
-        hvarx = 1e3*dx[steps, :]
-        vvarx = 1e3*xp[steps, :]
-        hvary = 1e3*dy[steps, :]
-        vvary = 1e3*yp[steps, :]
-        hvars = 1e3*ds[steps, :]
-        vvars = dps[steps, :]
-        sxyh = max(np.nanstd(hvarx, axis=1).max(), np.nanstd(hvary, axis=1).max())
-        sxyv = max(np.nanstd(vvarx, axis=1).max(), np.nanstd(vvary, axis=1).max())
+        hvar_x = 1e3*dx[steps, :]
+        vvar_x = 1e3*xp[steps, :]
+        hvar_y = 1e3*dy[steps, :]
+        vvar_y = 1e3*yp[steps, :]
+        hvar_s = 1e3*ds[steps, :]
+        vvar_s = dps[steps, :]
+#         sxy_h = max(np.nanstd(hvar_x, axis=1).max(), np.nanstd(hvar_y, axis=1).max())
+#         sxy_v = max(np.nanstd(vvar_x, axis=1).max(), np.nanstd(vvar_y, axis=1).max())
+#         ss_h = np.nanstd(hvar_s, axis=1).max()
+#         ss_v = np.nanstd(vvar_s, axis=1).max()
+        sxy_h = max(np.nanstd(hvar_x, axis=1).mean(), np.nanstd(hvar_y, axis=1).mean())
+        sxy_v = max(np.nanstd(vvar_x, axis=1).mean(), np.nanstd(vvar_y, axis=1).mean())
+        ss_h = np.nanstd(hvar_s, axis=1).mean()
+        ss_v = np.nanstd(vvar_s, axis=1).mean()
         _lims = {
-            'xy.h': 1.5*sxyh,
-            'xy.v': 1.5*sxyv,
-            's.h':  1.5*np.nanstd(hvars, axis=1).max(),
-            's.v':  1.5*np.nanstd(vvars, axis=1).max(),
+                'xy.h': 3*sxy_h,
+                'xy.v': 3*sxy_v,
+                's.h':  3*ss_h,
+                's.v':  3*ss_v,
         }
         if lims: 
-            _lims.update(lims)
+                _lims.update(lims)
+
+        N = len(steps)
+        if colorbar:
+            Ncols = 9
+        else:
+            Ncols = 3
+
+        w_hb = 5
+        h_hb = 6
+        w_cb = 1
+        cb_pad = 1
+        w_fig = 3*w_hb + int(Ncols>3)*(w_cb + cb_pad)
+        h_fig = N*h_hb
+        if colorbar:
+            widths = [8, 1, 3, 8, 1, 3, 8, 1, 3]
+        else:
+            widths = [1, 1, 1]
+        poincarefig = plt.figure(figsize=(w_fig, h_fig), facecolor='white')
+        gs = GridSpec(nrows=N, ncols=Ncols, hspace=0.2, width_ratios=widths, figure=poincarefig)
         for row, step in enumerate(steps):
-            plt.subplot(N, 3, 3*row + 1)
-            plt.xlabel("dx (mm)")
-            plt.ylabel("x' (mrad)")
+            hsl = slice(row*h_hb, (row+1)*h_hb)
+            if colorbar:
+                ax_x =  plt.subplot(gs[row, 0])
+                cax_x = plt.subplot(gs[row, 1])
+                ax_y =  plt.subplot(gs[row, 3])
+                cax_y = plt.subplot(gs[row, 4])
+                ax_s =  plt.subplot(gs[row, 6])
+                cax_s = plt.subplot(gs[row, 7])
+            else:
+                _w = w_fig//3
+                ax_x = plt.subplot(gs[row, 0])
+                ax_y = plt.subplot(gs[row, 1])
+                ax_s = plt.subplot(gs[row, 2])
+            ax_x.set_xlabel(r"$\Delta x$ (mm)")
+            ax_x.set_ylabel(r"$x'$ (mrad)")
             hlim, vlim = _lims['xy.h'], _lims['xy.v']
-            plt.hexbin(hvarx[row], vvarx[row], extent=[-hlim, hlim, -vlim, vlim])
+            hb_x = ax_x.hexbin(hvar_x[row], vvar_x[row], extent=[-hlim, hlim, -vlim, vlim])
             if colorbar:
-                plt.colorbar()
-            plt.subplot(N, 3, 3*row + 2)
-            plt.xlabel("dy (mm)")
-            plt.ylabel("y' (mrad)")
-            plt.hexbin(hvary[row], vvary[row], extent=[-hlim, hlim, -vlim, vlim])
+                Colorbar(mappable=hb_x, ax=cax_x)
+
+            ax_y.set_xlabel(r"$\Delta y$ (mm)")
+            ax_y.set_ylabel(r"$y'$ (mrad)")
+            hb_y = ax_y.hexbin(hvar_y[row], vvar_y[row], extent=[-hlim, hlim, -vlim, vlim])
+            ax_y.set_title(f't={self.tns[step]:.2f} ns {extralabel(step)}')
             if colorbar:
-                plt.colorbar()
-            plt.title(f't={self.tns[step]:.2f} ns {extralabel(step)}')
-            plt.subplot(N, 3, 3*row + 3)
-            plt.xlabel("ds (mm)")
-            plt.ylabel("dps (bg)")
+                Colorbar(mappable=hb_y, ax=cax_y)
+
+            ax_s.set_xlabel(r"$\Delta s$ (mm)")
+            ax_s.set_ylabel(r"$\Delta p_s (\beta\gamma)$")
             hlim, vlim = _lims['s.h'], _lims['s.v']
-            plt.hexbin(hvars[row], vvars[row], extent=[-hlim, hlim, -vlim, vlim])
+            hb_s = ax_s.hexbin(hvar_s[row], vvar_s[row], extent=[-hlim, hlim, -vlim, vlim])
             if colorbar:
-                plt.colorbar()
-            
-        plt.tight_layout()
-        return fig
+                Colorbar(mappable=hb_s, ax=cax_s, )
+
+        if not colorbar:
+            gs.tight_layout(poincarefig)
+                
+        return poincarefig
+
     
     def plot_trace(self, step, which, kind='marker', ax=None, *args, **kwargs):
         """
@@ -631,16 +700,16 @@ def rmsemit(x, xp):
 def twiss(x, xp):
     """
     Given a trace space (x, xp) (in the Frenet frame), calculate the 
-    values of beta_x, alfa_x, gama_x, emit_x
+    RMS values of beta_x, alfa_x, gama_x, emit_x
     """
     # "centering" the distribution so that <x> = <x'> = 0 exactly by construction
-    x -= x.mean(axis=1)[:, np.newaxis]
-    xp -= xp.mean(axis=1)[:, np.newaxis]
+    x -= x.nanmean(axis=1)[:, np.newaxis]
+    xp -= xp.nanmean(axis=1)[:, np.newaxis]
     
     # expectation values of <x^2> <x'^2>, <xx'>
-    xx = np.mean(x**2, axis=1)
-    xpxp = np.mean(xp**2, axis=1)
-    xxp = np.mean(x*xp, axis=1)
+    xx = np.nanmean(x**2, axis=1)
+    xpxp = np.nanmean(xp**2, axis=1)
+    xxp = np.nanmean(x*xp, axis=1)
 
     emit = np.sqrt(xx*xpxp - xxp**2)
     beta = xx / emit
